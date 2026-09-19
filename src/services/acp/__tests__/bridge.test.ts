@@ -1871,3 +1871,91 @@ describe('replayHistoryMessages — message-id (RFD)', () => {
     expect(typeof chunkCall!.messageId).toBe('string')
   })
 })
+
+// ── API error messages must survive streaming ────────────────────
+//
+// A synthetic API error message (isApiErrorMessage) carries its text only in
+// `message.content`. No stream_event ever emitted that text, so the
+// streamingActive duplicate filter must not drop it — otherwise the failure
+// reaches the client as an empty turn with no error surface.
+
+describe('forwardSessionUpdates — API error messages', () => {
+  test('emits agent_message_chunk for API error text while streaming is active', async () => {
+    const conn = makeConn()
+    const msgs: SDKMessage[] = [
+      {
+        type: 'stream_event',
+        parent_tool_use_id: null,
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'partial answer' },
+        },
+      },
+      {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        isApiErrorMessage: true,
+        message: {
+          model: '<synthetic>',
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'API Error: OpenAI stream ended without returning any data',
+            },
+          ],
+        },
+      } as unknown as SDKMessage,
+    ]
+    await forwardSessionUpdates(
+      's1',
+      makeStream(msgs),
+      conn,
+      new AbortController().signal,
+      {},
+    )
+    const calls = (conn.sessionUpdate as ReturnType<typeof mock>).mock.calls
+    const texts = calls
+      .map(c => (c[0] as { update: Record<string, unknown> }).update)
+      .filter(u => u.sessionUpdate === 'agent_message_chunk')
+      .map(u => (u.content as { text: string }).text)
+    expect(texts).toContain(
+      'API Error: OpenAI stream ended without returning any data',
+    )
+  })
+
+  test('still filters the streamed duplicate of a normal assistant message', async () => {
+    const conn = makeConn()
+    const msgs: SDKMessage[] = [
+      {
+        type: 'stream_event',
+        parent_tool_use_id: null,
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'Answer' },
+        },
+      },
+      {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Answer' }],
+        },
+      } as unknown as SDKMessage,
+    ]
+    await forwardSessionUpdates(
+      's1',
+      makeStream(msgs),
+      conn,
+      new AbortController().signal,
+      {},
+    )
+    const calls = (conn.sessionUpdate as ReturnType<typeof mock>).mock.calls
+    const texts = calls
+      .map(c => (c[0] as { update: Record<string, unknown> }).update)
+      .filter(u => u.sessionUpdate === 'agent_message_chunk')
+      .map(u => (u.content as { text: string }).text)
+    expect(texts).toEqual(['Answer'])
+  })
+})
